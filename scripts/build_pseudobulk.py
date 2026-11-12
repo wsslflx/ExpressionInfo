@@ -42,25 +42,70 @@ sys.path.insert(0, str(ROOT / "src"))
 from expressioninfo.data import DATA_PROCESSED  # noqa: E402
 
 NORMAL = "PATO:0000461"
-OBS_COLS = ["soma_joinid", "dataset_id", "donor_id", "assay", "cell_type_ontology_term_id", "cell_type",
-            "tissue_general_ontology_term_id", "tissue_general", "tissue_ontology_term_id", "tissue", "raw_sum"]
 
 
 def log(msg: str) -> None:
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
-def select_cells(obs: pd.DataFrame, args, rng: np.random.Generator) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Filter cells, assign halves by collection, define samples, subsample. Returns (cells, samples, split info)."""
-    tissue_col = "tissue_general_ontology_term_id" if args.tissue_level == "general" else "tissue_ontology_term_id"
-    tissue_lab = "tissue_general" if args.tissue_level == "general" else "tissue"
-    n0 = len(obs)
-    keep = obs["cell_type_ontology_term_id"].str.startswith("CL:") & obs[tissue_col].str.startswith("UBERON:")
+def tissue_columns(args) -> tuple[str, str]:
+    return (("tissue_general_ontology_term_id", "tissue_general") if args.tissue_level == "general"
+            else ("tissue_ontology_term_id", "tissue"))
+
+
+def filter_chunk(df: pd.DataFrame, args) -> pd.DataFrame:
+    """Per-chunk cell filters: ontology-mapped cell type and tissue, assay, non-empty cell. Categoricals become plain
+    strings only AFTER filtering, which keeps memory low."""
+    tissue_col, _ = tissue_columns(args)
+    keep = (df["cell_type_ontology_term_id"].astype(str).str.startswith("CL:")
+            & df[tissue_col].astype(str).str.startswith("UBERON:") & (df["raw_sum"] > 0))
     if args.assay_contains:
-        keep &= obs["assay"].str.contains(args.assay_contains, case=False, regex=False)
-    keep &= obs["raw_sum"] > 0
-    obs = obs[keep].copy()
-    log(f"cells after filters: {len(obs):,} of {n0:,}")
+        keep &= df["assay"].astype(str).str.contains(args.assay_contains, case=False, regex=False)
+    df = df[keep]
+    return df.assign(**{c: df[c].astype(str) for c in df.columns if isinstance(df[c].dtype, pd.CategoricalDtype)})
+
+
+def expected_cells(census, args) -> int | None:
+    """Number of cells the metadata query should return, from Census' own summary table, for the progress bar:
+    primary healthy cells of the organism (with --tissue: all primary cells of that tissue, an upper bound)."""
+    try:
+        sc = census["census_info"]["summary_cell_counts"].read().concat().to_pandas()
+        sc = sc[sc["organism"].astype(str).str.lower().str.replace(" ", "_") == args.organism]
+        if args.tissue:
+            row = sc[(sc["category"] == "tissue_general") & (sc["label"] == args.tissue)]
+        else:
+            row = sc[(sc["category"] == "disease") & (sc["ontology_term_id"] == NORMAL)]
+        return int(row["unique_cell_count"].iloc[0]) if len(row) else None
+    except Exception:
+        return None
+
+
+def read_metadata(census, exp, args) -> pd.DataFrame:
+    """Stream the cell metadata in chunks with a progress bar, filtering each chunk as it arrives."""
+    tissue_col, tissue_lab = tissue_columns(args)
+    cols = ["soma_joinid", "dataset_id", "donor_id", "assay", "cell_type_ontology_term_id", "cell_type",
+            tissue_col, tissue_lab, "raw_sum"]
+    flt = f"is_primary_data == True and disease_ontology_term_id == '{NORMAL}'"
+    if args.tissue:
+        flt += f" and tissue_general == '{args.tissue}'"
+    total = expected_cells(census, args)
+    bar = tqdm(total=total, unit="cell", unit_scale=True, desc="reading metadata", mininterval=5, smoothing=0.1)
+    parts, n_read = [], 0
+    for tbl in exp.obs.read(value_filter=flt, column_names=cols):
+        n_read += tbl.num_rows
+        parts.append(filter_chunk(tbl.to_pandas(), args))
+        bar.update(tbl.num_rows)
+        bar.set_postfix_str(f"{sum(len(p) for p in parts):,} kept", refresh=False)
+    bar.close()
+    obs = pd.concat(parts, ignore_index=True)
+    log(f"cells after filters: {len(obs):,} of {n_read:,} healthy primary cells")
+    return obs
+
+
+def select_cells(obs: pd.DataFrame, args, rng: np.random.Generator) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Assign halves by collection, define samples, subsample. Returns (cells, samples, split info)."""
+    tissue_col, tissue_lab = tissue_columns(args)
+    obs = obs.copy()
 
     # halves by collection: all datasets of one publication go to the same half
     colls = np.array(sorted(obs["collection_id"].unique()))
@@ -162,14 +207,8 @@ def main() -> None:
         build = dict(zip(summary["label"], summary["value"].astype(str)))
         datasets = census["census_info"]["datasets"].read(column_names=["dataset_id", "collection_id"]).concat().to_pandas()
         exp = census["census_data"][args.organism]
-        flt = f"is_primary_data == True and disease_ontology_term_id == '{NORMAL}'"
-        if args.tissue:
-            flt += f" and tissue_general == '{args.tissue}'"
         log(f"reading cell metadata ({args.organism}, Census {build.get('census_build_date', args.census_version)})")
-        obs = exp.obs.read(value_filter=flt, column_names=OBS_COLS).concat().to_pandas()
-        for c in obs.columns:                       # Census returns categoricals; plain strings keep joins simple
-            if isinstance(obs[c].dtype, pd.CategoricalDtype):
-                obs[c] = obs[c].astype(str)
+        obs = read_metadata(census, exp, args)
         obs = obs.merge(datasets, on="dataset_id", how="left")
         if obs["collection_id"].isna().any():
             raise SystemExit("some datasets have no collection_id in census_info/datasets")
