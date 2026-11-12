@@ -15,6 +15,7 @@ dependencies:
   - nbformat
   - nbconvert
   - pytest
+  - tqdm
   - pip
   - pip:
       - cellxgene-census    # CELLxGENE Census (TileDB-SOMA) for the pseudobulk step

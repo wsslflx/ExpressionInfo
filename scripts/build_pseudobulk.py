@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +35,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -109,7 +109,9 @@ def accumulate(exp, cells: pd.DataFrame, var: pd.DataFrame, group_keys: list[tup
     G, V = len(group_keys), len(var)
     sums = np.zeros((G, V), dtype=np.float64)
     hits = np.zeros((G, V), dtype=np.float32)
-    n_entries, t0 = 0, time.time()
+    seen = np.zeros(len(coords), dtype=bool)   # every selected cell has raw_sum > 0, so each one appears at least once
+    n_entries = 0
+    bar = tqdm(total=len(coords), unit="cell", unit_scale=True, desc="reading counts", mininterval=5, smoothing=0.1)
     with exp.axis_query(measurement_name="RNA", obs_query=soma.AxisQuery(coords=(coords,))) as q:
         for tbl in q.X("raw").tables():
             o = tbl["soma_dim_0"].to_numpy()
@@ -124,7 +126,13 @@ def accumulate(exp, cells: pd.DataFrame, var: pd.DataFrame, group_keys: list[tup
                 rows = np.repeat(np.arange(G), np.diff(m.indptr))
                 arr[rows, m.indices] += m.data          # no duplicate (row, col) pairs left, so += is exact
             n_entries += len(x)
-            log(f"  {n_entries:,} non-zero counts processed, up to cell {pos.max() + 1:,} of {len(coords):,} ({time.time() - t0:,.0f} s)")
+            new = np.unique(pos[~seen[pos]])         # cells seen for the first time in this chunk
+            seen[new] = True
+            bar.update(len(new))
+            bar.set_postfix_str(f"{n_entries:,} non-zero counts", refresh=False)
+    bar.close()
+    if not seen.all():
+        log(f"WARNING: {int((~seen).sum()):,} selected cells returned no counts")
     return sums, hits
 
 
