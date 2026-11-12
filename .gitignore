@@ -1,0 +1,11 @@
+# data and results are large and reproducible from the scripts
+data/raw/
+data/processed/
+results/
+# python / tooling
+__pycache__/
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+.idea/workspace.xml
+.DS_Store

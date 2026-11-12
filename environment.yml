@@ -1,0 +1,23 @@
+name: ExpressionInfo
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - pandas
+  - pyarrow
+  - anndata
+  - matplotlib
+  - seaborn
+  - jupyter
+  - ipykernel
+  - nbformat
+  - nbconvert
+  - pytest
+  - pip
+  - pip:
+      - cellxgene-census    # CELLxGENE Census (TileDB-SOMA) for the pseudobulk step
+      - pybiomart           # Ensembl BioMart: orthologs, gene biotypes (later steps)
+      - obonet              # Cell Ontology / UBERON (later steps)
+      - -e .                # this package (src/expressioninfo)
